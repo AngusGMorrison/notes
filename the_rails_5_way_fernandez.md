@@ -2820,3 +2820,31 @@
   ```
 * Use the `adapter: :adapter_name` option if the custom type works only with a specific database adapter.
 * Working with money: use the `Money-Rails` gem.
+
+## Serialized Attributes
+* `seralize` marks an attribute backed by a text column in the database as being serialized. Whatever gets assigned to that attribute will be stored in the database a YAML.
+  ```Ruby
+  class User < ApplicationRecord
+    # Note: defaults to nil
+    serialize :preferences, Hash
+  end
+  ```
+  * Optional second parameter limits the type of object that may be stored.
+    * If not of that type on retrieval, `SerializationTypeMismatch` is raised.
+* There is no easy way to set a default value.
+* Largely outdated in favour of `store`.
+
+### `ActiveRecord::Store`
+* `store` uses `serialize` behind the scenes to declare a single-column key/value store.
+  ```Ruby
+  class User < ApplicationRecord
+    store :settings
+  end
+  ```
+* `store` is set to an empty `HashWithIndifferentAccess` by default.
+* Marshalling:
+  * Serializing and deserializing data is referred to as marshalling.
+  * Defaults to YAML.
+  * Supply an alternative with `:coder`.
+* Accessing stored data:
+  * `store_accessor` declares attribute accessors for the store fields.
