@@ -2847,4 +2847,185 @@
   * Defaults to YAML.
   * Supply an alternative with `:coder`.
 * Accessing stored data:
-  * `store_accessor` declares attribute accessors for the store fields.
+  * `store_accessor` declares attribute accessors for the store fields:
+    `store_accessor :inline_help`
+  * Or declare inline:
+    `store :settings, accessors: [:inline_help, :promos_ok]`
+* Overwriting default accessors:
+  * Useful for type coercion and data manipulation of items retrieved from the store.
+  * 
+    ```Ruby
+    class Song < ApplicationRecord
+      store :settings, accessors: [:volume_adjustment]
+
+      def volume_adjustment
+        super.to_i
+      end
+
+      def volume_adjustment=(decibels)
+        super(decibels.to_s) # Not acutally necessary; all values will be coerced to strings on the way to the DB.
+      end
+    end
+    ```
+* Validations:
+  * With the exception of `uniqueness`, which relies on database queries, you can specify validations for serialized attributes as you would normal attributes.
+  *
+    ```Ruby
+    class Song < ApplicationRecord
+      store :settings, accessors: [:volume_adjustment]
+
+      validates_inclusion_of :volume_adjustment, in: 1..10
+    end
+* Limitations:
+  * Nested hashes are not supported.
+  * Data in serialized stores can't be accessed in SQL queries.
+
+### Native Database Support for Serialized Attributes
+* Rails 4 brought support for PostgreSQL-native Hstore, JSON and JSONb type columns.
+ *`hstore`:
+  * Stores values as strings.
+  * Single-level key-value store, no nesting allowed.
+  * May require type coercion on both database and application levels.
+  * Avoid – buggy and with too many limitations around typecasting.
+* `json`:
+  * Keeps exact copy of input provided.
+  * All operations involve re-parsing.
+  * Requires explicit index for querying.
+  * Preserves key ordering.
+* `jsonb`:
+  * Keeps binary repesentation to avoid reparsing.
+  * Automatically indexed, making it possible to query any path without a specific index.
+  * Does not preserve key ordering.
+* If setting a default value for any of these types, pass the migration default value a Ruby hash, not a JSON string hash.
+
+## Enums
+* Once an attribute is set as enumerable, Active Record will restrict the assignment of the attribute to a collection of predefined values.
+*
+  ```Ruby
+  class Post < ApplicationRecord
+    enum status: %i[draft published archived]
+  end
+  ```
+* Active Record implicitly maps each value too an integer, therefore, the column type must be an integer.
+* By default, an `enum` attribute is set to `nil`.
+* Use `:default` to supply a default.
+* Predicate and bang methods are created automatically, e.g. `post.draft?`, `post.draft!`
+
+### Prefixes and Suffixes
+* Used to avoid collisions:
+  ```Ruby
+  class Issue < ApplicationRecord
+    enum :state, [:open, :closed]
+    enum :other_state, [:something, :closed], _prefix: :other_state
+  end
+  ```
+
+### Reflection
+* Active Record creates a class method with a pluralized name of the defined `enum` on the model that returns a hash with the key and value of each status.
+
+## Generating Secure Tokens
+* 
+  ```Ruby
+  class User < ApplicationRecord
+    has_secure_token
+  ```
+  * `User` instances automatically get a unique token.
+  * Takes an optional name parameter matching the name of the desired database field:
+    `has_secure_token :auth_token`
+* Regenerate tokens with `instance.regenerate_<token_name>`.
+
+### Migrations
+* Rails uses `SecureRandom.base58(24) to generate tokens, so collisons are highly unlikely, but it is advisable to put a unique constraint on the database column just in case.
+* Declare the column type `:token`, and the column will be added as a string with a unique index.
+
+## Calculation Methods
+* Calculation methods do not return an `ActiveRecord::Relation`, so must be the last method in a scope chain.
+* Two basic forms of output:
+  * Single aggregate value typecast to `Fixnum` for `COUNT`, `Float` for `AVG` and the column's type for everything else.
+  * Grouped values: an ordered hash of the values grouped by the `:group` option.
+    * Takes either a column name or the name of a `belongs_to` association.
+*
+  ```Ruby
+  # SELECT AVG(age) FROM people
+  Person.average(:age)
+
+  # Selects the minimum age for everyone with a last name other than "Drake"
+  Person.where.not(last_name: "Drake").minimum(:age)
+
+  # Selects the minimum age for any family without any minors
+  Person.having("min(age) > 17").group(:last_name).minimum(:age)
+  ```
+
+## Batch Operations
+
+### Creating Many Records
+* Drop down to the `connection` level to utilise the database's functionality for bulk imports.
+* Two types of bulk import operations:
+  * Provide more than one list to the `VALUES` clause of the `INSERT_INTO` statement:
+    ```Ruby
+    CSV.foreach("path/to/items.csv") do |row|
+      items << "('#{row[0]}','#{row[1]}'...)"
+    end
+
+    BATCH_SIZE = 1000
+
+    while items.any?
+      next_batch = items.shift(BATCH_SIZE)
+      sql = "INSERT INTO items(legacy_id, name, ...)
+             VALUES " + next_batch.join(", ")
+      ActiveRecord::Base.connection.execute(sql)
+    end
+    ```
+    * Considerations:
+      * Much faster than going via Active Record.
+      * No validations, automatic associations or security protections (e.g. sanitization).
+      * Must manually handle key constraints, duplicate data, etc.
+    * `activerecord-import` gem simplifies this process and optimizes to avoid N+1 queries.
+  * Using `COPY` to import millions of rows:
+    * `INSERT`-based approaches don't scale to millions of rows of data.
+    * Postgres `COPY FROM` extension along with the `pg` gem enables this:
+      ```Ruby
+      # Set up raw connection
+      conn = ActiveRecord::Base.connection.raw_connection
+      conn.exec("COPY items (legacy_id, name, ...) FROM STDIN WITH CSV")
+
+      file = File.open("path/to/import.csv", 'r')
+      while !file.eof?
+        # Add row to copy data
+        conn.put_copy_data(file.readline)
+      end
+
+      # When finished with the import, call put_copy_end method provided by Ruby's PG driver
+      conn.put_copy_end
+
+      # Check the result for errors and print them
+      while res = conn.get_result
+        if err = res.error_message
+          p err
+        end
+      end
+      ```
+
+### Reading Many Records at Once
+* Returning many results from a query consumes a lot of memory – ActiveRecord will instantiate each object before you can manipulate it.
+* Optimizing large reads with `find_each`:
+  * Breaks processing into manageable chunks that fit in Ruby's working memory (heap).
+  * Executes in batches of 1000 records by default.
+  *
+    ```Ruby
+    namespace :export do
+      task :call_list do
+        puts "name,phone"
+        Contact.where(...).find_each do |contact|
+          puts "#{contact.name},#{contact.phone}"
+        end
+    ```
+  * Options:
+    * `:batch_size`: Specifies the size of the batch. Defaults to 1000.
+    * `:begin_at`: Specifies the primary key value to start from, inclusive of the value.
+    * `:finish`: Specifies the primary key vlaue to end at, inclusive of the value.
+    * `:error_on_ignore`: Raises an error if the order and limit have to be ignored due to batching.
+  * You could use these options to have multiple workers working on separate batches.
+  * The sort order is automatically set to ascending on the primary key to make the batch ordering work.
+  * You can't set a query limit because that parameter is used to control the batch sizes.
+  * Where only the values are required and not Active Record objects, it is more efficient to use `pluck`, which yields arrays of data.
