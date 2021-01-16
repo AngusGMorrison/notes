@@ -3029,3 +3029,281 @@
   * The sort order is automatically set to ascending on the primary key to make the batch ordering work.
   * You can't set a query limit because that parameter is used to control the batch sizes.
   * Where only the values are required and not Active Record objects, it is more efficient to use `pluck`, which yields arrays of data.
+* Reading groups of records at a time using `find_in_batches`:
+  * `find_each` yields once for each record in the result set.
+  * `find_in_batches` yields groups of records as arrays.
+  * Pass it a block that takes the group as an argument, or chain it with other enumerable methods.
+  *
+    ```Ruby
+    namespace :export do
+      task :call_list do
+        puts "batch_num,name,phone"
+        Contact.where(...).find_in_batches.with_index do |contacts, n|
+          contacts.each do
+            ...
+          end
+    ```
+* Operating on groups of records using `in_batches`:
+  * Instead of executing the query itself like `find_in_batches`, it yields an `ActiveRecord::Relation` representing the batch.
+  * E.g. efficiently cleaning up old data:
+    ```Ruby
+    task :notifications do
+      q = ["created_at < ?", 1.year.ago]
+      Notification.where(q).in_batches do |rel|
+        rel.delete_all # Nothing is ever loaded from the DB
+        sleep(10)
+      end
+    ```
+  * Yields groups of 1000 records by default.
+  * Options are similar to `find_in_batches` and `find_each`, except:
+    * `:of`: specifies the batch size.
+    * `:load`: Specifies whether the relation should be loaded, making the behaviour like `find_in_batches`.
+
+### Updating Many Records at Once
+* `update_all` (on `ActiveRecord::Base` and `ActiveRecord::Relation`) is dangerous because it indiscriminately updates all rows in a table without running validations or callbacks.
+  * If one row fails, the entire operation will fail.
+* Calling `update` on each member of a relation requires N+1 operations but respects validations and failure of one row does not cause others to fail.
+
+### Bulk Deletion
+* `delete_all` deletes many rows quickly without concern for associations, dependent-destroys or callbacks.
+* `destroy` and `destroy_all` must be used to automatically respect associations, etc., but at a significant performance cost.
+* A better option may be to manually ensure that the object and its associations are removed with separate `delete_all` calls.
+
+## Single-Table Inheritance
+
+### Mapping Inheritance to the Database
+* In STI, you establish one table in the database to hold all of the records for any sub-type of object in a given inheritance hierarchy.
+  * In Active Record, the table is named after the top parent class of the hierarchy.
+* A `type` column is used to represent the type of the stored object.
+  ```Ruby
+  class AddTypeToTimesheet < ActiveRecord::Migration
+    def change
+      add_column :timesheets, :type, :string
+    end
+  end
+  ```
+  * No default is needed. Active Record will populate the column with the right value automatically.
+* When you find objects using the query methods of the base STI class, Rais with automatically instantiate objects using the appropriate subclass.
+
+### STI Considerations
+* You can't have an attribute on two different subclasses with the same name but a different type.
+* You need to have one column per attribute on any subclass, and any attribute that is not shared by all subclasses must accept `nil` values.
+  * It is not a good idea to have too many atributes unique to specific subclasses, and thus many `NULL` columns.
+  * To validate data not shared by all subclasses, you must se ActiveRecord validations and not the database.
+* To set an alternative name for the type column:
+  ```Ruby
+  class Timesheet < ActiveRecord::Base
+    self.inheritance_column = "object_type"
+  ```
+
+## Abstract Base Model Classes
+* Active Record models can share common code via inheritance and still be persisted to different database tables.
+* `ActiveRecord::Base` is itself an abstract model.
+*
+  ```Ruby
+  class Place < ActiveRecord::Base
+    self.abstract_class = true
+  end
+  ```
+* Once a `Place` is established, you would have to establish individual tables for states, countries and cities.
+  * We can no longer query across subtypes with `Place.all`.
+* Both class and instance methods are shared down the inheritance hierarchy of Active Record models, as are constants and included modules.
+
+## Polymorphic `has_many` Relationships
+* Unlike the regular polymorphic union of a class hierarchy, you're only dealing with a particular association to a single target class from any number of source classes, source classes which don't have anything else to do with each other.
+  * They aren't in any particular inheritance relationship and are probably persisted in completely different tables.
+* A concept needs to be applied to a divergent set of entities which are not directly related.
+  * Known as a "cross-cutting concern".
+
+### Modeling User Comments
+* Having a `Comment` class belong to both `BillableWeek` and `Timesheet` classes, and having both `billable_week_id` and `timesheet_id` as columns in its database table would be difficult to work with and hard to extend.
+  * You'd need code to ensure that a `Comment` never belonged to both at the same time.
+  * The code to figure out what a given comment is attached to would be cumbersome to write.
+  * Every time you wanted comments of another nullable class, you'd have to add another nullable foreign key column.
+
+## Foreign Key Constraints
+* Referential integrity refers to the enforcement of otherwise implied relationships among data.
+  * Accomplished with foreign key constraints on the database.
+*
+  ```Ruby
+  def change
+    add_foreign_key :auctions, :users, on_delete: :cascade
+  
+    # or...
+    create_table :auctions do |t|
+      t.references :user, index: true, foreign_key: {on_delete: :cascade}
+    end
+  end
+  ```
+* Composite foreign keys must be created via the database connection directly.
+
+### Foreign Key Names and Indexes
+* If the column names can't be derived from the table names, `:column` and `:primary_key` let you specify.
+* Names for foreign key constraints start `fk_rails_` followed by 10 characters that are deterministically generated from the tables and columns involved.
+  * Use the `:name` option to specify a different foreign key name.
+
+### Removing Foreign Keys
+*
+  ```Ruby
+  # Let Active Record figure out the column name
+  remove_foreign_key :accounts, :branches
+
+  # Remove foreign key for a specific column
+  remove_foreign_key :accounts, column: :owner_id
+
+  # Remove foreign key by name
+  remove_foreign_key :accounts, name: :special_fk_name
+  ```
+
+## Modules for Reusing Common Behavior
+* Defining resusable `Commentable` behaviour like this results in an error because the module `Commentable` doesn't inherit from `ApplicationRecord` and has no method `has_many`.
+  ```Ruby
+  module Commentable
+    has_many :comments, as: :commentable
+  end
+  ```
+
+### The `included` callback
+* If a `Module` object defines the method `included`, it gets run whenever the module is included in another module or class.
+  * The argument passed to `included` is the module/class object into which this module is being included.
+* 
+  ```Ruby
+  module Commentable
+    def self.included(base)
+      base.class_eval do
+        has_many :comments, as: :commentable
+      end
+    end
+  end
+  ```
+* Rails supports a simpler form through the Active Support API:
+  ```Ruby
+  module Commentable
+    extend ActiveSupport::Concern
+    included do
+      has_many :comments, as: :commentable
+    end
+  end
+  ```
+* Concerns (i.e. things that concern a number of otherwise unrelated models) are saved in `app/models/concerns`.
+  * Automatically part of the application load path.
+
+## Value Objects
+* Value objects are generally immutable, and are considered equal if their attributes are equal.
+* They are POROs – they do not inherit from `ActiveRecord::Base`.
+* The attributes of a value object are stored in the same table as the parent object. E.g. a Person with a single Address:
+  *
+    ```Ruby
+    class CreatePeople < ActiveRecord::Migration[5.0]
+      def change
+        create_table :people do |t|
+          t.string :name
+          t.string :address_street
+          t.string :address_city
+          t.string :address_state
+        end
+      end
+    end
+
+    class Person < ActiveRecord::Base
+      def address
+        @address ||= Address.new(address_city, address_state)
+      end
+
+      def address=(address)
+        self[:address_city] = address.city
+        self[:address_state] = address.state
+        
+        @address = address
+      end
+    end
+
+    class Address
+      attr_reader :city, :state
+
+      def initialize(city, state)
+        @city, @state = city, state
+      end
+
+      def ==(other_address)
+        city == other_adress.city && state == other_address.state
+      end
+    end
+    ```
+
+### Immutability
+* Don't allow value objects to be changed after creation. Active Record will not persist value objects that have been changed through means other than the writer method on the parent object.
+
+## Non-persisted Models
+* To make an object behave like an Active Record instance without persisting it, including validations, etc., `include ActiveModel::Model`.
+  * Ensures POROs can fit the interface of methods that expect Active Record models.
+
+## Modifying Active Record Classes at Runtime
+*
+  ```Ruby
+  class Account < ActiveRecord::Base
+    ...
+    protected
+
+    def after_find
+      singleton = class << self; self; end
+      singleton.class_eval(config)
+    end
+  end
+  ```
+
+## PostgreSQL
+
+### Array Type
+* Allows us to store a list of values within a single database row.
+*
+  ```Ruby
+  class AddTagsToArticles < ActiveRecord::Migration
+    def change
+      change_table :articles do |t|
+        t.string :tags, array: true
+      end
+    end
+  end
+  ```
+* `:length`: Limits the number of elements which can be stored in the array.
+* `default: "{}"`: Sets the default for the array.
+* If PgArrayParser is installed, Rails will use it when parsing Postgres' array representation.
+* Querying:
+  * Using the `ANY `method queries for records that have at least one matching element in the array:
+    `Article.where("? = ANY(tags)", "rails")`
+  * `ALL` finds records where all values in the array match the criteria.
+* Use GiST or GIN indexes for large tables with array columns:
+  `add_index :articles, :tags, using: :gin`
+
+### Network Address Types
+* IPv4: `inet` type.
+* IPv6: `cidr` type.
+  * Retrived IP address objects are instantiated as `IPAddr` instances.
+  * Setting either to an invalid network address will raise `IPAddr::InvalidAddressError`.
+* MAC address: `macaddr`.
+  * Invalid values result in `ActiveRecord::StatementInvalid::PG::InvalidTextRepresentation`.
+
+### UUID Type
+* Use column type `:uuid`.
+  * Invalid values result in `ActiveRecord::StatementInvalid::PG::InvalidTextRepresentation`.
+  
+### Range Types
+* The following range types are supported:
+  * `daterange`
+  * `int4range`
+  * `int8range`
+  * `numrange`
+  * `tsrange`
+  * `tstzrange`
+
+### JSON Type
+* The encoding is handled behind the scenes with `ActiveSupport::JSON`.
+
+### Index Types
+* Postgres supports B-tree, Hash, GiST, SP-GiST, GIN and BRIN.
+* By default, `CREATE_INDEX` creates B-tree indexes.
+* GIN and GiST are best suited for queries on textual columns such as `hstore`, `array` and `json`.
+  * GIN lookups are three times faster than GiST.
+  * GiST indexes are three times faster to build.
+  * Support queries with `@>`, `?`, `?&`, and `?|` operators.
