@@ -1,4 +1,4 @@
-# The Rails 5 Way
+  # The Rails 5 Way
 *Obie Fernandez*
 
 # Chapter 1: Rails Configuration and Environments
