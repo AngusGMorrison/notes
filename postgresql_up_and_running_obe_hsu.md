@@ -516,3 +516,155 @@
     * Delete the file and try again.
   * There is an orphaned Postgres process.
     * Kill all running Postgres processes and try again.
+
+# Chapter 3: psql
+
+## Environment Variables
+* Avoid specifying connection settings for psql by setting `PGHOST`, `PGPORT` and `PGUSER` env vars.
+* For more secure access, create a password file (http://bit.ly/12scPrZ).
+* `PSQL_HISTORY`: Sets the name of the the psql history file.
+* `PSQLRC`: Specifies the location and name of a custom configuration file.
+  * psql reads settings from here at startup.
+
+## Interative vs Noninteractive psql
+* `\?` brings up a list of available commands.
+* `\h` followed by a command shows the Postgres documentation for the command.
+* To run commands repeatedly or in sequence, create a script and run it with psql noninteratively.
+  * `psql -f <path_to_script_file>`
+  * `psql -d my_db -c "DROP TABLE IF EXISTS angus; CREATE SCHEMA staging;"`
+
+## psql Customizations
+* Settings changed within a session will only last for the duration of a session.
+* Settings specified in `psqlrc` will be loaded each time psql loads.
+* To reset a config variable, use `\unset <setting>`.
+* When using `\set`, use all caps to set system options and lowercase for your own variables.
+
+### Timing Executions
+* `\timing` toggles query timing on and off.
+
+### Autocommit Commands
+* Autocommit is on by default.
+  * Each command is in its own transaction and is irreversible.
+* `\set AUTOCOMMIT off` disables autocommit, allowing you to manually `ROLLBACK;` or `COMMIT;` large batch transactions.
+
+### Shortcuts
+* Store useful keyboard shortcuts in `psqlrc`.
+  * E.g. `\set eav 'EXPLAIN ANALYZE VERBOSE`.
+* Use a colon to resolve the variable:
+  * `:eav SELECT COUNT(*) FROM pg_tables;`
+
+### Retrieving Prior Commands
+* `HISTSIZE` determines the number of previous commands that can be recalled.
+* To pipe the command history into a file for later reference:
+  `\set HISTFILE ~/.psql_history - :DBNAME`.
+
+## psql Gems
+
+### Executing Shell Commands
+* Run shell commands with `\!`:
+  `\! dir`
+
+### Watching Statements
+* `watch` repeatedly runs an SQL statement at fixed intervals so you can monitor output.
+  *
+    ```SQL
+    SELECT datname, query
+    FROM pg_stat_activity
+    WHERE state = 'active' AND pid != pg_backend_pid();
+    \watch 10
+    ```
+* `watch` can also be used for performing an action at regular intervals:
+  *
+    ```SQL
+    SELECT * INTO log_activity
+    FROM pg_stat_activity;
+
+    INSERT INTO log_activity
+    SELECT * FROM pg_stat_activity; \watch 5
+    ```
+    * Only the second statement is repeated.
+* Kill `watch` with `CTRL-X CTRL-C`.
+
+### Retrieving Details of Database Objects
+* `\d` is used to describe various objects.
+* `\d+` provides additional details.
+
+### Crosstabs
+* Cross tabulation outputs a table where the first column serves as a row header, the second column as a column header, and the third as the value that goes in each cell.
+*
+  ```SQL
+  SELECT student, subject, AVG(score)::numeric(5,2) AS avg_score
+  FROM test_scores
+  GROUP BY student, subject
+  ORDER BY student, subject
+  \crosstabview student subject avg_score
+  ```
+
+### Dynamic SQL Execution
+* You can execute generated SQL in a single step with the `\gexec` command, which iterates through each cell of your query and executes the SQL inside.
+  * Iteration is by row, then column.
+  * `gexec` is oblivious to the result of the SQL execution.
+* This example creates two tables in inserts one row into each table:
+  *
+    ```SQL
+    SELECT
+      'CREATE TABLE ' || person.name || ' (a integer, b integer)' AS create,
+      'INSERT INTO ' || person.name || ' VALUES(1,2) ' AS insert
+    FROM (VALUES ('leo'),('regina')) AS person (name) \gexec
+    ```
+
+## Importing and Exporting Data
+* `\copy` lets you import data from and export data to a text file.
+  * Tab is the default delimiter.
+  * Newlines must separate the rows.
+
+## psql Import
+* Before loading denormalized or unfamiliar data, create a staging schema to accept it, then write explorative queries.
+  * Distribute the data into normalized production tables and delete the staging schema.
+* psql processes the entire import as a single transaction.
+  * An error causes the whole import to fail.
+*
+  ```SQL
+  \connec† postgresql_book
+  \cd /postgresql_book/ch03
+  \copy staging.factfinder_import FROM DEC_10_SF1_QTH_with_ann.csv CSV
+  ```
+* If the file has nonstandard delimiters:
+  `\copy sometable FROM somefile.txt DELIMITER '|';`
+* To replace `NULL` values during import:
+  `\copy sometable FROM somefile.txt NULL AS '';
+* `\copy` is not the same as the Postgres `COPY` command.
+  * `\copy` interprets all paths relative to the connected client.
+  * `COPY` must be able to find its input file in a path accessible by the postgres service account.
+
+### psql Export
+*
+  ```SQL
+  \connect postgresql_book
+  \copy (SELECT * FROM staging.factfinder_import WHERE s01 ~ E'^[0-9]+')
+  TO '/test.tab'
+  WITH DELIMITER E'\t'
+  ```
+  * Tab-delimited format does not export header columns; must use CSV for headers:
+    `WIH CSV HEADER`.
+
+### Copying from or to Program
+* psql can fetch data from the output of command-line programs such as `curl` and `ls`, and dump the data into a table.
+*
+  ```SQL
+  \connect postgresql_book
+  CREATE TABLE dir_list (filename text);
+  \copy dir_list FROM PROGRAM 'dir C:\projects /b'
+  ```
+
+## Basic Reporting
+* psql can create HTML reports:
+*
+  ```bash
+  psql -d postgresql_book -H -c "
+  SELECT category, COUNT(*) AS num_per_cat
+  FROM pg_settings
+  WHERE category LIKE '%QUERY%'
+  GROUP BY category
+  ORDER BY category;
+  " -o test.html
